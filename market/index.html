@@ -1,0 +1,1070 @@
+<!DOCTYPE html>
+<!--
+  3D 会场专项 · MVP-2「福市夜巷」v2（质感重构版）
+  按 guizang-game-skill 的阶段法重做：
+  阶段1 渲染底座：真实星空 HDR（Poly Haven dikhololo_night, CC0）+ PMREM 反射、指数雾、
+        UnrealBloom（emissive 峰值控制在 2-3 防过曝白块）、ACES 调色、CSS 暗角
+  阶段2 场景材质：CC0 PBR 整套贴图（ambientCG：石板地面/木板/布纹，Color+Normal+Roughness）、
+        灯笼 canvas 纹理、蒸笼木箱道具、远景屋顶剪影灯火、每摊位独立暖光
+  色板统一：暖金/橙红/深红主调，青色仅奶茶摊一处点缀（去彩虹化）
+  商品 = 真实素材图（生产环境由供给接口下发 URL）；图库素材仅本地实验。
+  调试：?debug=1 性能面板 / ?solid 纯色诊断 / window.__mvp 自动化钩子
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>神券节 · 福市夜巷</title>
+<script>window.__errs = []; window.addEventListener('error', (e) => window.__errs.push(String(e.message) + ' @' + String(e.lineno))); window.addEventListener('unhandledrejection', (e) => window.__errs.push('rej:' + String(e.reason)));</script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; overflow: hidden; background: #0e0b15; }
+  body { font-family: -apple-system, "PingFang SC", "Helvetica Neue", sans-serif; color: #fff; }
+  #gl { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  .vignette { position: fixed; inset: 0; z-index: 4; pointer-events: none;
+    background: radial-gradient(ellipse at 50% 42%, transparent 46%, rgba(5,2,8,.55) 100%); }
+
+  .topbar { position: fixed; top: 0; left: 0; right: 0; z-index: 5; pointer-events: none;
+    padding: calc(14px + env(safe-area-inset-top)) 20px 34px;
+    background: linear-gradient(180deg, rgba(5,3,8,.72), transparent); text-align: center; }
+  .topbar .tag { display: inline-block; font-size: 10px; letter-spacing: .3em; color: #ffd98a;
+    border: 1px solid rgba(255,217,138,.45); border-radius: 999px; padding: 3px 12px; margin-bottom: 10px;
+    background: rgba(20,10,5,.4); }
+  .topbar h1 { font-size: 26px; letter-spacing: .18em; font-weight: 700;
+    text-shadow: 0 2px 16px rgba(255,140,60,.45), 0 1px 4px rgba(0,0,0,.8); }
+  .topbar .sub { margin-top: 6px; font-size: 12px; color: rgba(255,235,205,.75); letter-spacing: .1em; }
+
+  .hint { position: fixed; left: 16px; bottom: calc(16px + env(safe-area-inset-bottom)); z-index: 5;
+    font-size: 11px; letter-spacing: .12em; color: rgba(255,240,214,.6);
+    background: rgba(10,6,10,.45); border: 1px solid rgba(255,217,138,.18); border-radius: 999px;
+    padding: 6px 14px; backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+  .hud { position: fixed; right: 16px; bottom: calc(52px + env(safe-area-inset-bottom)); z-index: 40; display: none;
+    font: 11px/1.7 ui-monospace, Menlo, monospace; color: #9fe0c0; background: rgba(0,0,0,.55);
+    padding: 6px 9px; border-radius: 6px; white-space: pre; }
+
+  .nogl { position: fixed; inset: 0; z-index: 8; display: none; overflow-y: auto;
+    background: linear-gradient(180deg, #1c0e14, #3a1116 60%, #58120f); padding: 90px 16px 40px; }
+  .nogl h2 { text-align: center; font-size: 18px; letter-spacing: .2em; color: #ffd98a; margin-bottom: 16px; }
+  .nogl .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; max-width: 560px; margin: 0 auto; }
+  .ncard { background: rgba(255,244,224,.97); border-radius: 12px; overflow: hidden; color: #4a1d10; }
+  .ncard img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; }
+  .ncard .pad { padding: 10px 12px 12px; }
+  .ncard b { font-size: 14px; display: block; }
+  .ncard .row { display: flex; justify-content: space-between; align-items: center; margin-top: 6px; }
+  .ncard .price { color: #b3261e; font-weight: 700; font-size: 16px; }
+  .ncard .btn { font-size: 12px; background: linear-gradient(90deg,#e2563f,#b3261e); color: #fff;
+    border-radius: 999px; padding: 5px 12px; cursor: pointer; }
+
+  .mask { position: fixed; inset: 0; z-index: 20; background: rgba(2,1,4,.5); opacity: 0; pointer-events: none;
+    transition: opacity .28s; backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px); }
+  .mask.on { opacity: 1; pointer-events: auto; }
+  .sheet { position: absolute; left: 0; right: 0; bottom: 0; max-width: 520px; margin: 0 auto;
+    background: linear-gradient(180deg, #241522, #160d13); border-radius: 18px 18px 0 0;
+    border-top: 1px solid rgba(255,190,120,.35); box-shadow: 0 -18px 60px rgba(0,0,0,.6);
+    padding: 18px 18px calc(18px + env(safe-area-inset-bottom)); transform: translateY(105%);
+    transition: transform .34s cubic-bezier(.2,.9,.25,1); color: #f4e9d8; }
+  .mask.on .sheet { transform: translateY(0); }
+  .sheet .grip { width: 38px; height: 4px; border-radius: 2px; background: rgba(255,235,200,.25); margin: 0 auto 14px; }
+  .sheet .close-x { position: absolute; right: 16px; top: 14px; color: rgba(255,240,214,.55); font-size: 18px; cursor: pointer; padding: 4px; }
+
+  .pcard { display: flex; gap: 14px; }
+  .pcard .img { width: 108px; height: 108px; border-radius: 14px; object-fit: cover; flex: none;
+    box-shadow: 0 6px 22px rgba(0,0,0,.5), inset 0 0 0 1px rgba(255,220,170,.2); }
+  .pcard .info { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .pcard .store { font-size: 11px; color: #ffc466; letter-spacing: .08em; }
+  .pcard b.name { font-size: 17px; margin-top: 3px; }
+  .pcard .stat { font-size: 11px; color: rgba(244,233,216,.55); margin-top: 5px; }
+  .pcard .stat em { font-style: normal; color: #ffd98a; }
+  .pcard .pricerow { margin-top: auto; display: flex; align-items: baseline; gap: 8px; }
+  .pcard .price { font-size: 24px; font-weight: 800; color: #ff8a5c; }
+  .pcard .price::before { content: "¥"; font-size: 14px; }
+  .pcard .orig { font-size: 12px; color: rgba(244,233,216,.4); text-decoration: line-through; }
+  .chip { display: inline-flex; align-items: center; gap: 4px; margin-top: 8px; align-self: flex-start;
+    font-size: 11px; color: #2b1206; background: linear-gradient(90deg,#ffd98a,#ffb35c);
+    border-radius: 6px; padding: 3px 8px; font-weight: 600; }
+  .btnrow { display: flex; gap: 10px; margin-top: 16px; }
+  .btn { flex: 1; text-align: center; padding: 12px 0; border-radius: 999px; font-size: 15px; letter-spacing: .1em;
+    cursor: pointer; user-select: none; transition: transform .12s; }
+  .btn:active { transform: scale(.97); }
+  .btn.ghost { border: 1px solid rgba(255,200,130,.55); color: #ffd98a; background: rgba(255,190,110,.06); }
+  .btn.ghost.done { border-color: rgba(160,160,160,.4); color: #9a938a; background: none; }
+  .btn.primary { background: linear-gradient(90deg, #ff8a3c, #e5432a); color: #fff; font-weight: 700;
+    box-shadow: 0 6px 20px rgba(229,67,42,.4); }
+
+  .detail { position: fixed; inset: 0; z-index: 30; background: #140b11; opacity: 0; pointer-events: none;
+    transition: opacity .3s; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  .detail.on { opacity: 1; pointer-events: auto; }
+  .detail .hero { position: relative; }
+  .detail .hero img { width: 100%; aspect-ratio: 4/3; object-fit: cover; display: block; }
+  .detail .hero::after { content: ""; position: absolute; inset: 0;
+    background: linear-gradient(180deg, rgba(20,11,17,.25), transparent 30%, rgba(20,11,17,.9) 96%); }
+  .detail .back { position: absolute; z-index: 2; left: 14px; top: calc(14px + env(safe-area-inset-top));
+    width: 36px; height: 36px; border-radius: 50%; background: rgba(10,5,8,.55); color: #ffe6bd;
+    display: flex; align-items: center; justify-content: center; font-size: 18px; cursor: pointer;
+    border: 1px solid rgba(255,220,170,.25); }
+  .detail .body { padding: 0 18px 20px; margin-top: -34px; position: relative; z-index: 2; }
+  .detail .store { font-size: 12px; color: #ffc466; letter-spacing: .1em; }
+  .detail h2 { font-size: 22px; margin: 6px 0 8px; }
+  .detail .stat { font-size: 12px; color: rgba(244,233,216,.6); }
+  .detail .stat em { font-style: normal; color: #ffd98a; }
+  .detail .pricerow { display: flex; align-items: baseline; gap: 10px; margin: 14px 0 4px; }
+  .detail .price { font-size: 30px; font-weight: 800; color: #ff8a5c; }
+  .detail .price::before { content: "¥"; font-size: 17px; }
+  .detail .orig { color: rgba(244,233,216,.4); text-decoration: line-through; font-size: 14px; }
+  .detail h3 { font-size: 14px; color: rgba(255,225,185,.85); letter-spacing: .12em; margin: 20px 0 8px; }
+  .spec { background: rgba(255,235,205,.05); border: 1px solid rgba(255,220,170,.14); border-radius: 12px; padding: 12px 14px; }
+  .spec .row { display: flex; justify-content: space-between; font-size: 13px; padding: 5px 0; color: rgba(244,233,216,.85); }
+  .spec .row span:first-child { color: rgba(244,233,216,.45); }
+  .review { border-left: 2px solid rgba(255,180,90,.5); padding: 2px 0 2px 12px; margin: 10px 0;
+    font-size: 13px; line-height: 1.7; color: rgba(244,233,216,.85); }
+  .review span { display: block; font-size: 11px; color: rgba(244,233,216,.45); margin-top: 4px; }
+  .detail .orderbar { position: sticky; bottom: 0; margin: 20px -18px 0; padding: 12px 18px calc(12px + env(safe-area-inset-bottom));
+    background: rgba(16,9,13,.92); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    border-top: 1px solid rgba(255,190,120,.2); }
+
+  .toast { position: fixed; left: 50%; top: 40%; transform: translate(-50%,-50%) scale(.9); z-index: 50;
+    background: rgba(0,0,0,.8); color: #fff; font-size: 14px; padding: 12px 22px; border-radius: 10px;
+    opacity: 0; pointer-events: none; transition: opacity .25s, transform .25s; letter-spacing: .08em;
+    border: 1px solid rgba(255,217,138,.3); }
+  .toast.on { opacity: 1; transform: translate(-50%,-50%) scale(1); }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div class="vignette"></div>
+
+<div class="topbar">
+  <div class="tag">3D 会场专项 · MVP-2 · 质感重构</div>
+  <h1>福市夜巷 · 神券夜市</h1>
+  <div class="sub">11.11 – 11.17 · 走进夜市，点开就能抢</div>
+</div>
+
+<div class="hint">单指拖动环视 · 滚轮推近 · 点商品抢购</div>
+<div class="hud" id="hud"></div>
+
+<div class="nogl" id="nogl">
+  <h2>福市 · 好店好物</h2>
+  <div class="grid" id="noglGrid"></div>
+</div>
+
+<div class="mask" id="cardMask">
+  <div class="sheet">
+    <div class="grip"></div><div class="close-x" id="cardClose">✕</div>
+    <div class="pcard">
+      <img class="img" id="pImg" alt="">
+      <div class="info">
+        <span class="store" id="pStore"></span>
+        <b class="name" id="pName"></b>
+        <div class="stat" id="pStat"></div>
+        <div class="pricerow"><span class="price" id="pPrice"></span><span class="orig" id="pOrig"></span></div>
+        <span class="chip" id="pCoupon"></span>
+      </div>
+    </div>
+    <div class="btnrow">
+      <div class="btn ghost" id="pClaimBtn">领 券</div>
+      <div class="btn primary" id="pBuyBtn">去抢购</div>
+    </div>
+  </div>
+</div>
+
+<div class="detail" id="detail">
+  <div class="hero">
+    <div class="back" id="detailBack">‹</div>
+    <img id="dImg" alt="">
+  </div>
+  <div class="body">
+    <span class="store" id="dStore"></span>
+    <h2 id="dName"></h2>
+    <div class="stat" id="dStat"></div>
+    <div class="pricerow"><span class="price" id="dPrice"></span><span class="orig" id="dOrig"></span></div>
+    <span class="chip" id="dCoupon"></span>
+    <h3>商品参数</h3>
+    <div class="spec" id="dSpec"></div>
+    <h3>买家说</h3>
+    <div id="dReviews"></div>
+    <div class="orderbar"><div class="btn primary" id="dOrder">立即下单</div></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { RGBELoader } from './vendor/loaders/RGBELoader.js';
+import { GLTFLoader } from './vendor/loaders/GLTFLoader.js';
+import * as SkeletonUtils from './vendor/utils/SkeletonUtils.js';
+import { EffectComposer } from './vendor/post/EffectComposer.js';
+import { RenderPass } from './vendor/post/RenderPass.js';
+import { UnrealBloomPass } from './vendor/post/UnrealBloomPass.js';
+import { OutputPass } from './vendor/post/OutputPass.js';
+
+/* ============ 供给数据（mock：生产环境由供给接口下发，含素材 URL） ============ */
+const PRODUCTS = [
+  { id:'P01', img:'assets/products/ramen.jpg',   sign:'鲜虾拉面', store:'面掌柜 · 日式拉面', name:'招牌鲜虾拉面',   price:26.9, orig:42,  rating:4.8, sales:'月售 1.8 万', eta:'30 分钟达', coupon:{amt:8, cond:'满 30 可用'},
+    spec:{ 规格:'单人份 · 汤面 550g', 口味:'豚骨汤底 · 微辣', 配料:'鲜虾×4 / 溏心蛋 / 海苔', 保存:'当日现做' },
+    reviews:[['汤头很浓，虾是现剥的，好吃到汤都没剩。','用户 138***2 · 11-09'],['打包回来面还是弹的，包装很用心。','用户 山***茶 · 11-07']] },
+  { id:'P02', img:'assets/products/burger.jpg',  sign:'厚牛堡',   store:'堡莱士 · 美式汉堡', name:'安格斯厚牛堡套餐', price:33.0, orig:55,  rating:4.7, sales:'月售 9,632',  eta:'25 分钟达', coupon:{amt:10, cond:'满 50 可用'},
+    spec:{ 规格:'汉堡 + 薯条 + 可乐', 肉饼:'安格斯牛肉 150g', 辣度:'不辣 / 可加辣', 保温:'锡纸锁温' },
+    reviews:[['肉饼多汁，面包是现烤的香气。','用户 汽***水 · 11-10'],['薯条到手里还是脆的，服气。','用户 L***n · 11-08']] },
+  { id:'P03', img:'assets/products/skewer.jpg',  sign:'烤串拼盘', store:'炭火江湖 · 烧烤',   name:'炭火烤串拼盘',   price:58.0, orig:96,  rating:4.9, sales:'月售 1.2 万', eta:'35 分钟达', coupon:{amt:15, cond:'满 80 可用'},
+    spec:{ 规格:'羊肉串×6 / 牛肉串×4 / 翅膀×2', 火候:'果木炭 · 现烤', 辣度:'中辣 / 可免辣', 赠品:'烤茄子半只' },
+    reviews:[['孜然给得足，一口回到大学门口。','用户 老***王 · 11-11'],['深夜放毒第一名，回购第三次。','用户 喵***酱 · 11-06']] },
+  { id:'P04', img:'assets/products/boba.jpg',    sign:'珍珠奶茶', store:'甜心茶饮 · 奶茶',   name:'黑糖珍珠鲜奶茶', price:15.0, orig:24,  rating:4.6, sales:'月售 2.6 万', eta:'20 分钟达', coupon:{amt:5, cond:'无门槛'},
+    spec:{ 规格:'中杯 500ml / 大杯 700ml', 甜度:'标准 / 少糖 / 无糖', 温度:'冰 / 常温 / 热', 小料:'珍珠免费加' },
+    reviews:[['珍珠是现煮的，软糯不粘牙。','用户 糖***果 · 11-10'],['热的大杯冬天喝太幸福了。','用户 冬***瓜 · 11-09']] },
+  { id:'P05', img:'assets/products/souffle.jpg', sign:'松饼塔',   store:'舒芙蕾工坊 · 甜品', name:'枫糖松饼塔',     price:29.9, orig:48,  rating:4.8, sales:'月售 6,870',  eta:'28 分钟达', coupon:{amt:8, cond:'满 40 可用'},
+    spec:{ 规格:'八层松饼 + 枫糖 + 香蕉', 现做:'下单现煎 · 15 分钟', 甜度:'适中', 适合:'下午茶 / 两人分享' },
+    reviews:[['糖浆浇下去那一下治愈了。','用户 柴***犬 · 11-08'],['松饼八层没塌，配送给力。','用户 M***o · 11-05']] },
+  { id:'P06', img:'assets/products/chicken.jpg', sign:'鸡柳拼盘', store:'金黄鸡铺 · 炸鸡',   name:'黄金鸡柳拼盘',   price:25.0, orig:39,  rating:4.7, sales:'月售 1.5 万', eta:'22 分钟达', coupon:{amt:6, cond:'满 30 可用'},
+    spec:{ 规格:'鸡柳 12 条 + 蘸酱', 外皮:'现裹糠 · 酥脆', 辣度:'原味 / 微辣', 赠品:'蜂蜜芥末酱' },
+    reviews:[['外皮咔嚓响，里面的肉是嫩的。','用户 阿***伟 · 11-11'],['追剧标配，两块起就不想停。','用户 布***丁 · 11-07']] },
+];
+
+const claimed = new Set();
+const claimCoupon = (id) => new Promise((res) => setTimeout(() => res({ code: 0, id }), 500));
+const track = (event, payload) => console.log('[track]', event, JSON.stringify(payload));
+
+/* ============ UI（与 v1 相同的交互链路） ============ */
+const $ = (id) => document.getElementById(id);
+const toastEl = $('toast'); let toastTimer = null;
+function toast(msg) { toastEl.textContent = msg; toastEl.classList.add('on');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => toastEl.classList.remove('on'), 1600); }
+
+let audioCtx = null;
+function ping(f1, f2) {
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    const t = audioCtx.currentTime;
+    [[f1, t], [f2, t + 0.09]].forEach(([f, when]) => {
+      const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+      o.type = 'sine'; o.frequency.value = f;
+      g.gain.setValueAtTime(0.0001, when);
+      g.gain.exponentialRampToValueAtTime(0.12, when + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, when + 0.25);
+      o.connect(g).connect(audioCtx.destination); o.start(when); o.stop(when + 0.3);
+    });
+  } catch (e) { /* 声音失败不影响主流程 */ }
+}
+
+let current = null;
+let cardOpenedAt = 0;
+function openCard(p) {
+  current = p;
+  cardOpenedAt = performance.now();
+  $('pImg').src = p.img; $('pStore').textContent = p.store; $('pName').textContent = p.name;
+  $('pStat').innerHTML = `评分 <em>${p.rating}</em> · ${p.sales} · ${p.eta}`;
+  $('pPrice').textContent = String(p.price).replace(/\.0$/, ''); $('pOrig').textContent = '¥' + p.orig;
+  $('pCoupon').textContent = `${p.coupon.amt > 0 ? '¥' + p.coupon.amt + ' 券' : '神券'} · ${p.coupon.cond}`;
+  const cb = $('pClaimBtn');
+  cb.className = 'btn ghost' + (claimed.has(p.id) ? ' done' : '');
+  cb.textContent = claimed.has(p.id) ? '已领取' : '领 券';
+  $('cardMask').classList.add('on');
+  track('product_card_view', { id: p.id });
+}
+function closeCard() { $('cardMask').classList.remove('on'); }
+$('cardClose').onclick = closeCard;
+$('cardMask').onclick = (e) => {
+  /* 移动端 tap 会补发合成 click，刚打开的卡片会被同一手势立刻点掉，加保护窗 */
+  if (e.target === $('cardMask') && performance.now() - cardOpenedAt > 400) closeCard();
+};
+$('pClaimBtn').onclick = async () => {
+  if (!current || claimed.has(current.id)) return;
+  track('coupon_claim_click', { id: current.id });
+  ping(660, 880);
+  await claimCoupon(current.id);
+  claimed.add(current.id);
+  $('pClaimBtn').className = 'btn ghost done'; $('pClaimBtn').textContent = '已领取';
+  track('coupon_claim_succ', { id: current.id });
+  markDisplayClaimed(current.id);
+  toast(`已领 ¥${current.coupon.amt} 券，下单立减`);
+};
+$('pBuyBtn').onclick = () => { if (current) openDetail(current); };
+
+function openDetail(p) {
+  current = p;
+  $('dImg').src = p.img; $('dStore').textContent = p.store; $('dName').textContent = p.name;
+  $('dStat').innerHTML = `评分 <em>${p.rating}</em> · ${p.sales} · ${p.eta}`;
+  $('dPrice').textContent = String(p.price).replace(/\.0$/, ''); $('dOrig').textContent = '¥' + p.orig;
+  $('dCoupon').textContent = `${p.coupon.amt > 0 ? '¥' + p.coupon.amt + ' 券' : '神券'} · ${p.coupon.cond}`;
+  $('dSpec').innerHTML = Object.entries(p.spec).map(([k, v]) =>
+    `<div class="row"><span>${k}</span><span>${v}</span></div>`).join('');
+  $('dReviews').innerHTML = p.reviews.map(([t, who]) => `<div class="review">${t}<span>${who}</span></div>`).join('');
+  closeCard();
+  $('detail').classList.add('on');
+  $('detail').scrollTop = 0;
+  track('product_detail_view', { id: p.id });
+}
+$('detailBack').onclick = () => $('detail').classList.remove('on');
+$('dOrder').onclick = () => {
+  track('order_click', { id: current.id, price: current.price });
+  ping(880, 1320);
+  toast('下单成功（mock）· 跳转收银台');
+};
+
+function buildFallback() {
+  $('nogl').style.display = 'block';
+  $('noglGrid').innerHTML = PRODUCTS.map((p) => `
+    <div class="ncard"><img src="${p.img}" alt="${p.name}">
+      <div class="pad"><b>${p.name}</b>
+        <div class="row"><span class="price">¥${p.price}</span><span class="btn" data-id="${p.id}">去抢购</span></div>
+      </div></div>`).join('');
+  $('noglGrid').onclick = (e) => {
+    const id = e.target.dataset && e.target.dataset.id;
+    if (id) openDetail(PRODUCTS.find((x) => x.id === id));
+  };
+  track('plaza_fallback', { reason: 'webgl2 不可用' });
+}
+
+/* ============ 3D 场景（质感重构版） ============ */
+/* 商品 3D 模型（Kenney Food Kit，CC0）：资产管线 = 免费模型库 → GLTFLoader → 展台旋转展示 */
+const PRODUCT_MODELS = {
+  P01: ['assets/models/bowl-broth.glb'],
+  P02: ['assets/models/burger-cheese-double.glb'],
+  P03: ['assets/models/skewer-vegetables.glb', 'assets/models/skewer.glb'],
+  P04: ['assets/models/frappe.glb'],
+  P05: ['assets/models/pancakes.glb'],
+  P06: ['assets/models/fries.glb', 'assets/models/corn-dog.glb'],
+};
+const canvas = $('gl'), hud = $('hud');
+const Q = new URLSearchParams(location.search);
+const DEBUG = Q.has('debug');
+const FLAG = { noshadow: Q.has('noshadow'), nolights: Q.has('nolights'), notex: Q.has('notex'), nosky: Q.has('nosky') };
+if (DEBUG) hud.style.display = 'block';
+
+let renderer = null;
+try {
+  if (!canvas.getContext('webgl2')) throw new Error('no webgl2');
+  renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+} catch (e) { buildFallback(); }
+
+const displayByProduct = new Map();
+function markDisplayClaimed(id) {
+  const d = displayByProduct.get(id); if (!d) return;
+  d.userData.claimed = true;
+  d.userData.halo.material.color.set(0x6b6b6b);
+  d.userData.glow.visible = false;
+}
+
+if (renderer) {
+  /* ---------- 阶段1：渲染底座 ---------- */
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.12;
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0d0a14);
+  scene.fog = new THREE.FogExp2(0x0e0b16, 0.024);
+
+  const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 120);
+
+  /* 贴图工具：颜色图 sRGB，法线/粗糙度线性；统一各向异性 */
+  const texLoader = new THREE.TextureLoader();
+  const aniso = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+  function loadTex(url, srgb) {
+    const t = texLoader.load(url);
+    if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+    t.anisotropy = aniso;
+    return t;
+  }
+
+  /* 环境：先用程序化夜色渐变兜底，真实星空 HDR 到达后无缝替换（PMREM 反射） */
+  const envCanvas = document.createElement('canvas');
+  envCanvas.width = 512; envCanvas.height = 256;
+  {
+    const ec = envCanvas.getContext('2d');
+    const g = ec.createLinearGradient(0, 0, 0, 256);
+    g.addColorStop(0, '#0b0d1c'); g.addColorStop(0.5, '#1a1018');
+    g.addColorStop(0.62, '#33150f'); g.addColorStop(1, '#080606');
+    ec.fillStyle = g; ec.fillRect(0, 0, 512, 256);
+  }
+  const envTex = new THREE.CanvasTexture(envCanvas);
+  envTex.mapping = THREE.EquirectangularReflectionMapping;
+  envTex.colorSpace = THREE.SRGBColorSpace;
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  scene.environment = pmrem.fromEquirectangular(envTex).texture;
+  envTex.dispose();
+  new RGBELoader().load('assets/env/night.hdr', (hdr) => {
+    hdr.mapping = THREE.EquirectangularReflectionMapping;
+    const prev = scene.environment;
+    scene.environment = pmrem.fromEquirectangular(hdr).texture;
+    if (prev) prev.dispose();
+    hdr.dispose();
+    track('env_hdr_loaded', {});
+  });
+  pmrem.dispose();
+
+  /* 灯光：低强度天光 + 主方向光 + 每摊位独立暖光（光是密度堆出来的） */
+  scene.add(new THREE.HemisphereLight(0x2a3350, 0x140a0a, 0.5));
+  const key = new THREE.DirectionalLight(0xffd9a0, 0.85);
+  key.position.set(5, 10, 8); key.castShadow = !FLAG.noshadow;
+  key.shadow.mapSize.set(1024, 1024);
+  Object.assign(key.shadow.camera, { left: -14, right: 14, top: 14, bottom: -14, far: 40 });
+  scene.add(key);
+  const moon = new THREE.DirectionalLight(0x7d8fd0, 0.22);
+  moon.position.set(-8, 14, -6); scene.add(moon);
+
+  const world = new THREE.Group(); scene.add(world);
+
+  /* ---------- 材质库（CC0 PBR + 统一暖色板） ---------- */
+  const groundColor = loadTex('assets/tex/ground_color.jpg', true);
+  groundColor.wrapS = groundColor.wrapT = THREE.RepeatWrapping; groundColor.repeat.set(6, 6);
+  const groundNormal = loadTex('assets/tex/ground_normal.jpg');
+  groundNormal.wrapS = groundNormal.wrapT = THREE.RepeatWrapping; groundNormal.repeat.set(6, 6);
+  const groundRough = loadTex('assets/tex/ground_rough.jpg');
+  groundRough.wrapS = groundRough.wrapT = THREE.RepeatWrapping; groundRough.repeat.set(6, 6);
+
+  const woodColor = loadTex('assets/tex/wood_color.jpg', true);
+  woodColor.wrapS = woodColor.wrapT = THREE.RepeatWrapping;
+  const woodNormal = loadTex('assets/tex/wood_normal.jpg');
+  woodNormal.wrapS = woodNormal.wrapT = THREE.RepeatWrapping;
+
+  const clothColor = loadTex('assets/tex/cloth_color.jpg', true);
+  clothColor.wrapS = clothColor.wrapT = THREE.RepeatWrapping;
+  const clothNormal = loadTex('assets/tex/cloth_normal.jpg');
+  clothNormal.wrapS = clothNormal.wrapT = THREE.RepeatWrapping;
+
+  const groundMat = new THREE.MeshStandardMaterial({
+    map: groundColor, normalMap: groundNormal, roughnessMap: groundRough,
+    color: 0xb0a49c, roughness: 1, metalness: 0.06, envMapIntensity: 1.15,
+  });
+  const woodMat = new THREE.MeshStandardMaterial({ map: woodColor, normalMap: woodNormal, color: 0x9a7050, roughness: 0.82, metalness: 0.02 });
+  const woodDark = new THREE.MeshStandardMaterial({ map: woodColor, normalMap: woodNormal, color: 0x4a3018, roughness: 0.85 });
+  const roofMat = new THREE.MeshStandardMaterial({ map: clothColor, normalMap: clothNormal, color: 0x8c2a1c, roughness: 0.7 });
+  const clothMat = new THREE.MeshStandardMaterial({ map: clothColor, normalMap: clothNormal, color: 0xa03424, roughness: 0.85 });
+  const goldMat = new THREE.MeshStandardMaterial({ color: 0xc9973f, roughness: 0.32, metalness: 0.75 });
+  const darkMat = new THREE.MeshStandardMaterial({ color: 0x120b10, roughness: 0.9 });
+  const NEON = ['#ffb454', '#ff8a4a', '#ffd98a', '#6fd8ff', '#ffc46a', '#ffe2b0']; /* 暖色板，青色仅奶茶摊 */
+
+  /* ---------- 地面（石板 + 湿夜反光） ---------- */
+  const ground = new THREE.Mesh(new THREE.CircleGeometry(30, 64), groundMat);
+  ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; world.add(ground);
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(2.3, 2.42, 96),
+    new THREE.MeshBasicMaterial({ color: 0xffb45c, transparent: true, opacity: 0.35 })
+  );
+  ring.rotation.x = -Math.PI / 2; ring.position.y = 0.015; world.add(ring);
+
+  /* ---------- 霓虹字牌（CanvasTexture 自发光，峰值≤2 防白块） ---------- */
+  function neonTexture(text, color, sub) {
+    const c = document.createElement('canvas'); c.width = 512; c.height = 160;
+    const x = c.getContext('2d');
+    x.fillStyle = '#140a10'; x.fillRect(0, 0, 512, 160);
+    x.strokeStyle = color; x.lineWidth = 6; x.globalAlpha = 0.9;
+    x.strokeRect(10, 10, 492, 140);
+    x.globalAlpha = 1; x.textAlign = 'center'; x.textBaseline = 'middle';
+    x.shadowColor = color; x.shadowBlur = 24;
+    x.fillStyle = color;
+    x.font = `700 ${text.length > 5 ? 60 : 74}px "PingFang SC", sans-serif`;
+    x.fillText(text, 256, sub ? 62 : 80);
+    if (sub) { x.font = '400 30px "PingFang SC", sans-serif'; x.shadowBlur = 10;
+      x.fillStyle = '#ffe2b8'; x.fillText(sub, 256, 122); }
+    const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+  }
+  function neonMaterial(text, color, sub) {
+    const tex = neonTexture(text, color, sub);
+    return new THREE.MeshStandardMaterial({
+      map: tex, emissive: 0xffffff, emissiveMap: tex, emissiveIntensity: 1.9, roughness: 0.5,
+    });
+  }
+
+  /* ---------- 灯笼（canvas 纹理：红渐变 + 骨架竖纹） ---------- */
+  function lanternTexture() {
+    const c = document.createElement('canvas'); c.width = 128; c.height = 128;
+    const x = c.getContext('2d');
+    const g = x.createRadialGradient(64, 64, 8, 64, 64, 64);
+    g.addColorStop(0, '#ff9a5c'); g.addColorStop(0.55, '#e84a28'); g.addColorStop(1, '#8c1a0c');
+    x.fillStyle = g; x.fillRect(0, 0, 128, 128);
+    x.strokeStyle = 'rgba(90,10,5,.5)'; x.lineWidth = 2;
+    for (let i = 1; i < 6; i++) { x.beginPath(); x.moveTo(i * 21, 0); x.lineTo(i * 21, 128); x.stroke(); }
+    const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+  }
+  const lanternTex = lanternTexture();
+
+  const lanterns = [], displays = [], bulbs = [];
+  function makeLantern(i) {
+    const g = new THREE.Group();
+    const mat = new THREE.MeshStandardMaterial({
+      map: lanternTex, emissive: 0xff6a30, emissiveMap: lanternTex, emissiveIntensity: 1.6, roughness: 0.5,
+    });
+    const body = new THREE.Mesh(new THREE.SphereGeometry(0.26, 24, 18), mat);
+    body.scale.set(1, 1.28, 1); g.add(body);
+    const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 0.07, 12), goldMat);
+    cap.position.y = 0.35; g.add(cap);
+    const cap2 = cap.clone(); cap2.position.y = -0.35; g.add(cap2);
+    const tassel = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.045, 0.24, 8), goldMat);
+    tassel.position.y = -0.5; g.add(tassel);
+    g.userData = { mat, seed: i * 1.37, base: 1.55 };
+    lanterns.push(g);
+    return g;
+  }
+
+  /* ---------- 柔光柱（径向渐变 Sprite，替代硬边圆筒） ---------- */
+  function glowSprite(color, scale) {
+    const c = document.createElement('canvas'); c.width = 128; c.height = 256;
+    const x = c.getContext('2d');
+    const g = x.createLinearGradient(0, 256, 0, 0);
+    g.addColorStop(0, color); g.addColorStop(0.75, color.replace(')', ',0.10)').replace('rgb', 'rgba')); g.addColorStop(1, 'rgba(255,200,120,0)');
+    x.fillStyle = g; x.fillRect(0, 0, 128, 256);
+    const m = new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), transparent: true, opacity: 0.3, depthWrite: false, blending: THREE.AdditiveBlending });
+    const s = new THREE.Sprite(m);
+    s.scale.set(scale, scale * 2, 1);
+    return s;
+  }
+
+  /* ---------- 道具：木箱 / 蒸笼（给摊位加细节密度） ---------- */
+  function crate(s) {
+    const g = new THREE.Group();
+    const box = new THREE.Mesh(new THREE.BoxGeometry(s, s * 0.8, s * 0.8), woodMat);
+    box.castShadow = true; box.receiveShadow = true; g.add(box);
+    const lid = new THREE.Mesh(new THREE.BoxGeometry(s * 1.06, s * 0.1, s * 0.86), woodDark);
+    lid.position.y = s * 0.45; g.add(lid);
+    return g;
+  }
+  function steamer() {
+    const g = new THREE.Group();
+    for (let i = 0; i < 2; i++) {
+      const ring = new THREE.Mesh(new THREE.CylinderGeometry(0.26, 0.26, 0.14, 18, 1, false), woodMat);
+      ring.position.y = i * 0.15; ring.castShadow = true; g.add(ring);
+    }
+    const top = new THREE.Mesh(new THREE.CylinderGeometry(0.27, 0.27, 0.03, 18), clothMat);
+    top.position.y = 0.32; g.add(top);
+    return g;
+  }
+
+  /* ---------- 摊位 ---------- */
+  function makeStall(p, i, angle) {
+    const g = new THREE.Group();
+    const R = 8.8;
+    g.position.set(Math.sin(angle) * R, 0, -Math.cos(angle) * R);
+    g.rotation.y = -angle; /* 正面朝向圆心（相机一侧） */
+
+    const counter = new THREE.Mesh(new THREE.BoxGeometry(3.4, 1.05, 1.3), woodMat);
+    counter.position.y = 0.52; counter.castShadow = true; counter.receiveShadow = true; g.add(counter);
+    const countertop = new THREE.Mesh(new THREE.BoxGeometry(3.6, 0.08, 1.5), woodDark);
+    countertop.position.y = 1.09; countertop.castShadow = true; g.add(countertop);
+    const roof = new THREE.Mesh(new THREE.BoxGeometry(3.9, 0.14, 1.9), roofMat);
+    roof.position.y = 3.35; roof.rotation.x = -0.08; roof.castShadow = true; g.add(roof);
+    const roofTrim = new THREE.Mesh(new THREE.BoxGeometry(4.0, 0.07, 2.0), goldMat);
+    roofTrim.position.y = 3.26; roofTrim.rotation.x = -0.08; g.add(roofTrim);
+    [-1.65, 1.65].forEach((x) => {
+      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 3.4, 10), woodMat);
+      pole.position.set(x, 1.75, -0.55); pole.castShadow = true; g.add(pole);
+    });
+    const skirt = new THREE.Mesh(new THREE.BoxGeometry(3.42, 0.5, 0.06), clothMat);
+    skirt.position.set(0, 0.62, 0.66); g.add(skirt);
+
+    const sign = new THREE.Mesh(new THREE.PlaneGeometry(2.9, 0.9), neonMaterial(p.sign, NEON[i % NEON.length], null));
+    sign.position.set(0, 2.55, 0.35); g.add(sign);
+
+    [-1.45, 1.45].forEach((x, k) => {
+      const lt = makeLantern(i * 2 + k);
+      lt.position.set(x, 2.75, 0.42); g.add(lt);
+      const wire = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, 0.5, 4), woodDark);
+      wire.position.set(x, 3.18, 0.42); g.add(wire);
+    });
+
+    /* 台面小道具：左箱右蒸笼，奇偶交替 */
+    if (i % 2 === 0) {
+      const c1 = crate(0.34); c1.position.set(-1.15, 1.32, 0.1); g.add(c1);
+      const st = steamer(); st.position.set(1.2, 1.13, 0.05); g.add(st);
+    } else {
+      const st = steamer(); st.position.set(-1.2, 1.13, 0.05); g.add(st);
+      const c1 = crate(0.3); c1.position.set(1.18, 1.29, 0.1); g.add(c1);
+      const c2 = crate(0.24); c2.position.set(1.2, 1.53, 0.08); g.add(c2);
+    }
+
+    /* 摊位独立暖光（光密度） */
+    if (!FLAG.nolights) {
+      const lp = new THREE.PointLight(0xffa050, 7, 6.5, 2);
+      lp.position.set(0, 2.3, 1.1); g.add(lp);
+    }
+
+    /* 商品展台：底盘 + 柔光柱 + 呼吸光环 + 真实素材相框 */
+    const display = new THREE.Group();
+    display.position.set(0, 1.13, 0.1);
+    const pedestal = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.58, 0.14, 28),
+      new THREE.MeshStandardMaterial({ color: 0x241418, roughness: 0.4, metalness: 0.3 }));
+    display.add(pedestal);
+    const halo = new THREE.Mesh(new THREE.RingGeometry(0.46, 0.56, 40),
+      new THREE.MeshBasicMaterial({ color: 0xffc466, transparent: true, opacity: 0.8, side: THREE.DoubleSide }));
+    halo.rotation.x = -Math.PI / 2; halo.position.y = 0.08; display.add(halo);
+    const glow = glowSprite('rgb(255,190,110)', 1.5);
+    glow.position.y = 1.0; display.add(glow);
+    const imgTex = texLoader.load(p.img);
+    imgTex.colorSpace = THREE.SRGBColorSpace; imgTex.anisotropy = aniso;
+    const SOLID = Q.has('solid');
+    /* 照片立牌 = 3D 模型加载成功前的兜底（加载成功后隐藏） */
+    const panel = new THREE.Mesh(new THREE.PlaneGeometry(1.1, 1.1),
+      new THREE.MeshBasicMaterial(SOLID ? { color: 0xff0000 } : { map: imgTex, toneMapped: false, side: THREE.DoubleSide }));
+    panel.position.set(0, 0.92, 0); display.add(panel);
+    display.userData.panel = panel;
+    const back = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 1.2), new THREE.MeshStandardMaterial({
+      color: 0x1a0d12, emissive: NEON[i % NEON.length], emissiveIntensity: 0.14,
+    }));
+    back.position.set(0, 0.98, -0.026); display.add(back);
+    display.userData = { productId: p.id, phase: i * 1.1, halo, glow, panel, claimed: false, pop: 0, baseY: 1.13 };
+    displays.push(display); displayByProduct.set(p.id, display);
+    g.add(display);
+    return g;
+  }
+
+  const ANGLES = [-0.95, -0.57, -0.19, 0.19, 0.57, 0.95];
+  PRODUCTS.forEach((p, i) => world.add(makeStall(p, i, ANGLES[i])));
+
+  /* ---------- 商品 3D 模型上展台（加载成功后替换照片兜底） ---------- */
+  const gltfLoader = new GLTFLoader();
+  const spinners = [];
+  function fitModel(obj, target) {
+    const box = new THREE.Box3().setFromObject(obj);
+    const size = box.getSize(new THREE.Vector3());
+    const s = target / Math.max(size.x, size.y, size.z);
+    obj.scale.setScalar(s);
+    const box2 = new THREE.Box3().setFromObject(obj);
+    const c = box2.getCenter(new THREE.Vector3());
+    obj.position.sub(c); obj.position.y += (box2.max.y - box2.min.y) / 2;
+    return obj;
+  }
+  Object.entries(PRODUCT_MODELS).forEach(([pid, files]) => {
+    const display = displayByProduct.get(pid); if (!display) return;
+    let loaded = 0;
+    files.forEach((url, idx) => {
+      gltfLoader.load(url, (gltf) => {
+        const m = fitModel(gltf.scene, files.length > 1 ? 0.72 : 0.95);
+        m.traverse((o) => { if (o.isMesh) { o.castShadow = true; } });
+        const holder = new THREE.Group();
+        holder.add(m);
+        holder.position.set(files.length > 1 ? (idx === 0 ? -0.26 : 0.26) : 0, 0.1, 0);
+        display.add(holder);
+        spinners.push({ obj: holder, speed: 0.5 + idx * 0.1 });
+        loaded++;
+        if (loaded === files.length && display.userData.panel) {
+          display.userData.panel.visible = false; /* 3D 模型就位，撤下照片兜底 */
+          track('product_model_loaded', { id: pid });
+        }
+      }, undefined, () => track('product_model_failed', { id: pid, url }));
+    });
+  });
+
+  /* ---------- 人群（Kenney Mini Characters，CC0）：游走 + 摊前驻足 ---------- */
+  const crowd = [], mixers = [];
+  const CHAR_FILES = ['character-male-a', 'character-male-b', 'character-male-c', 'character-female-a', 'character-female-b'];
+  const TINTS = [0xffffff, 0xffd8b8, 0xbfd4ff, 0xffe0e0, 0xd8ffd8];
+  let tintIdx = 0;
+  function tintClone(root) {
+    const clone = SkeletonUtils.clone(root);
+    const tint = new THREE.Color(TINTS[(tintIdx++) % TINTS.length]);
+    clone.traverse((o) => { if (o.isMesh) { o.material = o.material.clone(); o.material.color.multiply(tint); } });
+    return clone;
+  }
+  CHAR_FILES.forEach((name) => {
+    gltfLoader.load(`assets/models/chars/${name}.glb`, (gltf) => {
+      const proto = gltf.scene;
+      const s = 1.5 / new THREE.Box3().setFromObject(proto).getSize(new THREE.Vector3()).y; /* 归一到 1.5m */
+      const clips = gltf.animations || [];
+      const clip = (n) => clips.find((c) => c.name === n) || clips[0];
+      for (let k = 0; k < 3; k++) {
+        const m = tintClone(proto);
+        m.scale.setScalar(s);
+        const u = {
+          mode: 'walk',
+          radius: 6.3 + Math.random() * 1.0,
+          /* 60% 出生在前侧弧段（z>0，相机可见区），竖屏窄视野下也能常见到人 */
+          angle: Math.random() < 0.6 ? Math.PI + (Math.random() - 0.5) * 1.9 : Math.random() * Math.PI * 2,
+          speed: (0.09 + Math.random() * 0.05) * (Math.random() < 0.5 ? 1 : -1),
+        };
+        m.userData = u; crowd.push(m); world.add(m);
+        const mixer = new THREE.AnimationMixer(m);
+        mixer.timeScale = 0.85 + Math.random() * 0.4; /* 步频随机差异 */
+        mixer.clipAction(clip('walk')).play();
+        mixers.push(mixer);
+      }
+      const stand = tintClone(proto);
+      stand.scale.setScalar(s);
+      const si = tintIdx % ANGLES.length;
+      const sa = ANGLES[si] + (Math.random() - 0.5) * 0.24;
+      const sr = 7.0 + Math.random() * 0.4;
+      stand.position.set(Math.sin(sa) * sr, 0, -Math.cos(sa) * sr);
+      stand.rotation.y = -sa + Math.PI; /* 面向摊位 */
+      stand.userData = { mode: 'stand' };
+      crowd.push(stand); world.add(stand);
+      const mixer = new THREE.AnimationMixer(stand);
+      mixer.clipAction(clip('idle')).play();
+      mixers.push(mixer);
+    }, undefined, () => track('crowd_model_failed', { name }));
+  });
+
+  /* ---------- GLB 道具：酒桶 / 外卖盒 / 点心（细节密度） ---------- */
+  [['barrel', 3, 'ground'], ['chinese', 2, 'counter'], ['dim-sum', 2, 'counter'], ['plate-deep', 2, 'counter']].forEach(([name, count, where]) => {
+    gltfLoader.load(`assets/models/${name}.glb`, (gltf) => {
+      const proto = gltf.scene;
+      const box = new THREE.Box3().setFromObject(proto);
+      const size = box.getSize(new THREE.Vector3());
+      const s = (where === 'ground' ? 0.9 : 0.28) / Math.max(size.x, size.y, size.z);
+      for (let k = 0; k < count; k++) {
+        const m = proto.clone(true);
+        m.scale.setScalar(s);
+        const i = (k * 2 + (where === 'ground' ? 1 : 0)) % ANGLES.length;
+        const a = ANGLES[i];
+        if (where === 'ground') {
+          const side = k % 2 === 0 ? -1 : 1;
+          m.position.set(Math.sin(a) * 8.8 + Math.cos(a) * side * 2.6, 0, -Math.cos(a) * 8.8 + Math.sin(a) * side * 2.6 + 0.8);
+          m.rotation.y = Math.random() * Math.PI * 2;
+        } else {
+          m.position.set(Math.sin(a) * 8.8 - Math.cos(a) * (k % 2 ? 1.15 : -1.15), 1.14, -Math.cos(a) * 8.8 + Math.sin(a) * (k % 2 ? 1.15 : -1.15) - 0.1);
+          m.rotation.y = -a + Math.PI + (Math.random() - 0.5);
+        }
+        m.traverse((o) => { if (o.isMesh) o.castShadow = true; });
+        world.add(m);
+      }
+    });
+  });
+
+  /* ---------- 蒸汽（柔和上升白雾，循环） ---------- */
+  const steamTexCanvas = document.createElement('canvas');
+  steamTexCanvas.width = 64; steamTexCanvas.height = 64;
+  {
+    const x = steamTexCanvas.getContext('2d');
+    const g = x.createRadialGradient(32, 32, 4, 32, 32, 30);
+    g.addColorStop(0, 'rgba(255,245,235,.85)'); g.addColorStop(0.6, 'rgba(255,245,235,.35)'); g.addColorStop(1, 'rgba(255,245,235,0)');
+    x.fillStyle = g; x.fillRect(0, 0, 64, 64);
+  }
+  const steamTexture = new THREE.CanvasTexture(steamTexCanvas);
+  const steams = [];
+  function addSteam(localX, localZ, baseY, n, parent) {
+    for (let i = 0; i < n; i++) {
+      const m = new THREE.SpriteMaterial({ map: steamTexture, transparent: true, opacity: 0, depthWrite: false });
+      const s = new THREE.Sprite(m);
+      s.position.set(localX + (Math.random() - 0.5) * 0.3, baseY, localZ + (Math.random() - 0.5) * 0.3);
+      s.userData = { t: Math.random(), speed: 0.3 + Math.random() * 0.25, baseY, x0: s.position.x, z0: s.position.z };
+      parent.add(s); steams.push(s);
+    }
+  }
+  ANGLES.forEach((a, i) => {
+    const g = new THREE.Group();
+    g.position.set(Math.sin(a) * 8.8, 0, -Math.cos(a) * 8.8);
+    g.rotation.y = -a;
+    addSteam(i % 2 ? 1.2 : -1.2, 0.05, 1.75, i === 0 ? 6 : 4, g); /* 每摊蒸汽，拉面摊最旺 */
+    world.add(g);
+  });
+
+  /* ---------- 天灯（缓缓升空的孔明灯） ---------- */
+  const skyLanterns = [];
+  for (let i = 0; i < 5; i++) {
+    const lt = makeLantern(i);
+    lt.scale.setScalar(0.75);
+    lt.userData.sky = { speed: 0.16 + Math.random() * 0.1, x: (Math.random() - 0.5) * 16, z: -9 - Math.random() * 9, y: Math.random() * 11 };
+    world.add(lt); skyLanterns.push(lt);
+  }
+
+  /* ---------- 旗串（三角旗，随风波荡） ---------- */
+  const flags = [];
+  function bunting(a, b) {
+    for (let t = 0.1; t < 0.93; t += 0.075) {
+      const pos = new THREE.Vector3().lerpVectors(a, b, t);
+      pos.y -= Math.sin(t * Math.PI) * 0.55;
+      const flag = new THREE.Mesh(
+        new THREE.ConeGeometry(0.1, 0.24, 3),
+        new THREE.MeshStandardMaterial({ color: (Math.floor(t * 13) % 2) ? 0xc73a2a : 0xd9b25f, roughness: 0.7, side: THREE.DoubleSide })
+      );
+      flag.position.copy(pos);
+      flag.rotation.x = Math.PI;
+      flag.userData.seed = Math.random() * 10;
+      flags.push(flag); world.add(flag);
+    }
+  }
+  bunting(new THREE.Vector3(-9, 5.85, -5), new THREE.Vector3(9, 5.85, -5));
+  bunting(new THREE.Vector3(-9, 5.85, 5), new THREE.Vector3(9, 5.85, 5));
+
+  /* ---------- 炭火（烤串摊炉膛红光 + 青烟） ---------- */
+  const coals = new THREE.Mesh(
+    new THREE.BoxGeometry(2.3, 0.06, 0.5),
+    new THREE.MeshStandardMaterial({ color: 0x140604, emissive: 0xff5a1a, emissiveIntensity: 0.85, roughness: 0.9 })
+  );
+  {
+    const a = ANGLES[2];
+    coals.position.set(Math.sin(a) * 8.05, 0.06, -Math.cos(a) * 8.05);
+    coals.rotation.y = -a;
+    world.add(coals);
+    const smoke = new THREE.Sprite(new THREE.SpriteMaterial({ map: steamTexture, transparent: true, opacity: 0.16, depthWrite: false, color: 0x8899aa }));
+    smoke.scale.set(1.6, 2.4, 1);
+    smoke.position.set(Math.sin(a) * 7.7, 1.6, -Math.cos(a) * 7.7);
+    world.add(smoke);
+  }
+
+
+  /* ---------- 牌坊（背景地标） ---------- */
+  const gate = new THREE.Group();
+  const gateMat = new THREE.MeshStandardMaterial({ map: woodColor, normalMap: woodNormal, color: 0x7a2015, roughness: 0.6 });
+  [-2.4, 2.4].forEach((x) => {
+    const col = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.26, 5.2, 12), gateMat);
+    col.position.set(x, 2.6, 0); col.castShadow = true; gate.add(col);
+  });
+  const beamTop = new THREE.Mesh(new THREE.BoxGeometry(6.4, 0.35, 0.7), gateMat);
+  beamTop.position.y = 5.2; beamTop.castShadow = true; gate.add(beamTop);
+  const beamMid = new THREE.Mesh(new THREE.BoxGeometry(5.6, 0.3, 0.6), gateMat);
+  beamMid.position.y = 4.1; gate.add(beamMid);
+  const gateSign = new THREE.Mesh(new THREE.PlaneGeometry(3.4, 1.0), neonMaterial('神券夜市', '#ffd166', 'NIGHT MARKET'));
+  gateSign.position.set(0, 4.62, 0.36); gate.add(gateSign);
+  gate.position.set(0, 0, -16.5);
+  world.add(gate);
+
+  /* ---------- 远景：屋顶剪影环 + 点点灯火（填满背景，雾中若隐若现） ---------- */
+  if (!FLAG.nosky) {
+    const silMat = new THREE.MeshStandardMaterial({ color: 0x0a0710, roughness: 1 });
+    for (let i = 0; i < 26; i++) {
+      const a = (i / 26) * Math.PI * 2;
+      const h = 3 + Math.abs(Math.sin(i * 2.7)) * 6;
+      const w = 3 + Math.abs(Math.sin(i * 1.3)) * 3;
+      const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, 3), silMat);
+      b.position.set(Math.sin(a) * 26, h / 2 - 0.5, -Math.cos(a) * 26);
+      b.rotation.y = a;
+      world.add(b);
+    }
+    const winGeo = new THREE.BufferGeometry();
+    const wp = [];
+    for (let i = 0; i < 130; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const r = 23 + Math.random() * 5;
+      wp.push(Math.sin(a) * r, 1 + Math.random() * 7, -Math.cos(a) * r);
+    }
+    winGeo.setAttribute('position', new THREE.Float32BufferAttribute(wp, 3));
+    world.add(new THREE.Points(winGeo, new THREE.PointsMaterial({
+      color: 0xffb45c, size: 0.14, transparent: true, opacity: 0.85, depthWrite: false,
+    })));
+  }
+
+  /* ---------- 灯串 ---------- */
+  [[-9, -5], [9, -5], [-9, 5], [9, 5]].forEach(([x, z], idx) => {
+    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.11, 6, 10), woodMat);
+    pole.position.set(x, 3, z); pole.castShadow = true; world.add(pole);
+    if (idx < 2) {
+      const other = new THREE.Vector3(-x, 5.7, -5);
+      const a = new THREE.Vector3(x, 5.7, z);
+      for (let t = 0.1; t < 0.95; t += 0.085) {
+        const pos = new THREE.Vector3().lerpVectors(a, other, t);
+        pos.y -= Math.sin(t * Math.PI) * 0.9;
+        const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.085, 10, 8),
+          new THREE.MeshBasicMaterial({ color: 0xffc466 }));
+        bulb.position.copy(pos); world.add(bulb); bulbs.push(bulb);
+      }
+    }
+  });
+
+  /* ---------- 光尘 ---------- */
+  const P_COUNT = 220;
+  const pGeo = new THREE.BufferGeometry();
+  const pPos = new Float32Array(P_COUNT * 3);
+  for (let i = 0; i < P_COUNT; i++) {
+    pPos[i * 3] = (Math.random() - 0.5) * 30;
+    pPos[i * 3 + 1] = Math.random() * 8 + 0.3;
+    pPos[i * 3 + 2] = (Math.random() - 0.5) * 30 - 2;
+  }
+  pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
+  const dust = new THREE.Points(pGeo, new THREE.PointsMaterial({
+    color: 0xffcf8a, size: 0.03, transparent: true, opacity: 0.45, depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  }));
+  world.add(dust);
+
+  /* ---------- 相机 ---------- */
+  const clock = new THREE.Clock();
+  const target = new THREE.Vector3(0, 1.9, -0.5);
+  let yaw = 0, pitch = 0.26, radius = 17; /* 入场运镜从远处推进到 7.8 */
+  const yawLimit = 0.85, pitchLim = [0.1, 0.85], radiusLim = [5.5, 18];
+  let dragging = false, lastX = 0, lastY = 0, lastInteract = 0, intro = 0;
+
+  function applyCamera(t) {
+    const idle = t - lastInteract > 4 ? Math.sin((t - lastInteract - 4) * 0.25) * 0.045 : 0;
+    const y = yaw + idle;
+    camera.position.set(
+      target.x + radius * Math.sin(y) * Math.cos(pitch),
+      target.y + radius * Math.sin(pitch),
+      target.z + radius * Math.cos(y) * Math.cos(pitch)
+    );
+    camera.lookAt(target);
+  }
+  canvas.addEventListener('pointerdown', (e) => {
+    e.preventDefault(); /* 抑制移动端合成鼠标事件（幽灵点击） */
+    intro = 1; dragging = true; lastX = e.clientX; lastY = e.clientY; lastInteract = clock.getElapsedTime();
+  });
+  window.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    yaw = Math.max(-yawLimit, Math.min(yawLimit, yaw - (e.clientX - lastX) * 0.005));
+    pitch = Math.max(pitchLim[0], Math.min(pitchLim[1], pitch + (e.clientY - lastY) * 0.003));
+    lastX = e.clientX; lastY = e.clientY; lastInteract = clock.getElapsedTime();
+  });
+  window.addEventListener('pointerup', (e) => {
+    if (!dragging) return; dragging = false;
+    if (Math.hypot(e.clientX - lastX, e.clientY - lastY) < 9) pick(e);
+  });
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault(); intro = 1;
+    radius = Math.max(radiusLim[0], Math.min(radiusLim[1], radius + e.deltaY * 0.012));
+    lastInteract = clock.getElapsedTime();
+  }, { passive: false });
+
+  const ray = new THREE.Raycaster(), ptr = new THREE.Vector2();
+  function pick(e) {
+    ptr.x = (e.clientX / innerWidth) * 2 - 1;
+    ptr.y = -(e.clientY / innerHeight) * 2 + 1;
+    ray.setFromCamera(ptr, camera);
+    let hit = null;
+    for (const h of ray.intersectObjects(displays, true)) { hit = h; break; }
+    if (hit) {
+      let o = hit.object; while (o && !o.userData.productId) o = o.parent;
+      if (o) {
+        o.userData.pop = 1;
+        const p = PRODUCTS.find((x) => x.id === o.userData.productId);
+        ping(620, 930);
+        track('product_click', { id: p.id });
+        openCard(p);
+      }
+    }
+  }
+
+  /* ---------- 后期：Bloom（阈值收低让霓虹真正泛光，峰值控制防白块） ---------- */
+  const composer = new EffectComposer(renderer);
+  composer.addPass(new RenderPass(scene, camera));
+  const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.55, 0.4, 0.8);
+  composer.addPass(bloom);
+  composer.addPass(new OutputPass());
+
+  /* ---------- 性能分级 ---------- */
+  const DPR = [2, 1.5, 1];
+  let level = 0, frames = 0, acc = 0, low = 0, fpsAvg = 60;
+  function applyLevel() {
+    renderer.setPixelRatio(Math.min(devicePixelRatio || 1, DPR[level]));
+    key.castShadow = level < 2;
+    dust.visible = level < 2;
+    bloom.enabled = level < 2;
+    track('plaza_quality', { level });
+  }
+  function resize() {
+    camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight, false);
+    composer.setSize(innerWidth, innerHeight);
+  }
+  addEventListener('resize', resize); resize(); applyLevel();
+
+  let running = true;
+  document.addEventListener('visibilitychange', () => { running = !document.hidden; });
+
+  /* ---------- 主循环 ---------- */
+  let last = performance.now();
+  function loop() {
+    requestAnimationFrame(loop);
+    if (!running) return;
+    const t = clock.getElapsedTime();
+    const now = performance.now();
+    const dt = Math.min(0.05, (now - last) / 1000); last = now; /* 秒 */
+
+    frames++; acc += dt;
+    if (acc >= 1) {
+      fpsAvg = frames / acc; frames = 0; acc = 0;
+      low = fpsAvg < 27 ? low + 1 : 0;
+      if (low >= 3 && level < 2) { level++; applyLevel(); low = 0; }
+    }
+
+    /* 入场运镜 */
+    if (intro < 1) {
+      intro = Math.min(1, intro + dt / 3.2);
+      radius = 17 - (17 - 7.8) * (1 - Math.pow(1 - intro, 3));
+    }
+
+    applyCamera(t);
+    /* 商品模型旋转展示 */
+    spinners.forEach((s) => { s.obj.rotation.y += dt * s.speed; });
+    /* 人群：骨骼动画步态 */
+    mixers.forEach((mx) => mx.update(dt));
+    crowd.forEach((m) => {
+      const u = m.userData;
+      if (u.mode === 'walk') {
+        u.angle += u.speed * dt;
+        m.position.set(Math.sin(u.angle) * u.radius, 0, -Math.cos(u.angle) * u.radius);
+        const tx = Math.cos(u.angle) * u.speed, tz = Math.sin(u.angle) * u.speed;
+        m.rotation.y = Math.atan2(tx, tz);
+      }
+    });
+    /* 蒸汽上升 */
+    steams.forEach((s) => {
+      const u = s.userData;
+      u.t += dt * u.speed;
+      if (u.t > 1) { u.t = 0; }
+      s.position.y = u.baseY + u.t * 1.5;
+      s.position.x = u.x0 + Math.sin(t * 1.3 + u.baseY * 7) * 0.12 * u.t;
+      s.material.opacity = Math.sin(u.t * Math.PI) * 0.3;
+      s.scale.setScalar(0.22 + u.t * 0.9);
+    });
+    /* 天灯升空 */
+    skyLanterns.forEach((lt) => {
+      const u = lt.userData.sky;
+      u.y += dt * u.speed;
+      if (u.y > 12) { u.y = -0.5; u.x = (Math.random() - 0.5) * 16; u.z = -9 - Math.random() * 9; }
+      lt.position.set(u.x + Math.sin(t * 0.6 + u.y) * 0.4, u.y, u.z);
+    });
+    /* 旗串波动 */
+    flags.forEach((f) => { f.rotation.z = Math.sin(t * 1.8 + f.userData.seed) * 0.22; });
+    /* 炭火闪烁 */
+    coals.material.emissiveIntensity = 0.75 + 0.35 * Math.abs(Math.sin(t * 9) * Math.sin(t * 3.7));
+
+    displays.forEach((g) => {
+      const u = g.userData;
+      g.position.y = u.baseY + Math.sin(t * 1.5 + u.phase) * 0.07;
+      if (u.pop > 0) u.pop = Math.max(0, u.pop - dt / 0.38);
+      g.scale.setScalar(1 + Math.sin(u.pop * Math.PI) * 0.22);
+      u.halo.material.opacity = u.claimed ? 0.2 : 0.55 + 0.3 * Math.sin(t * 2.2 + u.phase);
+    });
+    lanterns.forEach((lt) => {
+      lt.userData.mat.emissiveIntensity = lt.userData.base * (0.85 + 0.15 * Math.sin(t * 7 + lt.userData.seed));
+    });
+    bulbs.forEach((b, i) => b.material.color.setHSL(0.09, 0.7, 0.55 + 0.14 * Math.sin(t * 3 + i)));
+    dust.rotation.y = t * 0.012;
+    gateSign.material.emissiveIntensity = 1.7 + 0.3 * Math.sin(t * 2.4);
+
+    if (bloom.enabled) composer.render(); else renderer.render(scene, camera);
+
+    if (DEBUG) {
+      hud.textContent = `fps ${fpsAvg.toFixed(0)}  dpr ${renderer.getPixelRatio().toFixed(2)}  level ${level}\n` +
+        `bloom ${bloom.enabled}  env ${scene.environment.type === undefined ? 'hdr' : 'canvas'}\n` +
+        `calls ${renderer.info.render.calls}  tris ${(renderer.info.render.triangles / 1000).toFixed(1)}k`;
+    }
+  }
+  track('plaza_expo', { products: PRODUCTS.length });
+  loop();
+
+  /* ---------- 调试钩子 ---------- */
+  window.__mvp = {
+    productScreenPos(id) {
+      const d = displayByProduct.get(id); if (!d) return null;
+      const v = new THREE.Vector3(); d.getWorldPosition(v); v.project(camera);
+      return { x: (v.x + 1) / 2 * innerWidth, y: (-v.y + 1) / 2 * innerHeight, behind: v.z > 1 };
+    },
+    state: () => ({ fps: fpsAvg, level, claimed: [...claimed], draws: renderer.info.render.calls, bloom: bloom.enabled }),
+    crowdSample: () => crowd.filter((m) => m.userData.mode === 'walk').slice(0, 3).map((m) => [+m.position.x.toFixed(2), +m.position.z.toFixed(2)]),
+    spinAngle: () => spinners[0] ? +spinners[0].obj.rotation.y.toFixed(3) : null,
+    panelInfo: (id) => {
+      const d = displayByProduct.get(id); if (!d) return null;
+      const panel = d.children.find((c) => c.material && c.material.map && c.material.isMeshBasicMaterial);
+      if (!panel) return { panel: false };
+      const m = panel.material.map;
+      return { hasMap: true, complete: !!(m.image && m.image.complete), w: m.image && m.image.width };
+    },
+    select: (id) => openCard(PRODUCTS.find((p) => p.id === id)),
+    openDetail: (id) => openDetail(PRODUCTS.find((p) => p.id === id)),
+    closeAll: () => { closeCard(); $('detail').classList.remove('on'); },
+  };
+} else {
+  window.__mvp = {
+    state: () => ({ fallback: true }),
+    select: (id) => openCard(PRODUCTS.find((p) => p.id === id)),
+    openDetail: (id) => openDetail(PRODUCTS.find((p) => p.id === id)),
+  };
+}
+</script>
+</body>
+</html>
